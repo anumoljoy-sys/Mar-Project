@@ -1,0 +1,160 @@
+FULL PC SERVER CODE
+import socket
+import numpy as np
+import cv2
+import torch
+from PIL import Image
+import requests
+
+from transformers import CLIPProcessor, CLIPModel
+
+# -----------------------------
+# CONFIGURATION
+# -----------------------------
+HOST = "0.0.0.0"
+PORT = 5000
+
+NODEMCU_IP = "192.168.137.30"   # 🔴 Replace if needed
+
+# -----------------------------
+# Load CLIP Model
+# -----------------------------
+print("Loading CLIP model...")
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+labels = [
+   "a peaceful scene",
+   "people fighting",
+   "a violent attack",
+   "a person holding a weapon",
+   "normal everyday activity"
+]
+
+# -----------------------------
+# Start Socket Server
+# -----------------------------
+server_socket = socket.socket()
+server_socket.bind((HOST, PORT))
+server_socket.listen(1)
+
+print("Waiting for Raspberry Pi connection...")
+conn, addr = server_socket.accept()
+print("Connected from:", addr)
+
+data = b""
+buzzer_on = False
+
+# -----------------------------
+# MAIN LOOP
+# -----------------------------
+while True:
+   try:
+       packet = conn.recv(4096)
+       if not packet:
+           break
+
+       data += packet
+
+       # Try decoding frame
+       nparr = np.frombuffer(data, np.uint8)
+       frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+       if frame is None:
+           continue
+
+       # Reset buffer after successful frame decode
+       data = b""
+
+       # Resize for faster processing
+       frame = cv2.resize(frame, (320, 240))
+
+       # Convert to PIL
+       image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+       # -----------------------------
+       # CLIP Processing
+       # -----------------------------
+       inputs = clip_processor(text=labels, images=image, return_tensors="pt", padding=True)
+       outputs = clip_model(**inputs)
+
+       logits = outputs.logits_per_image
+       probs = logits.softmax(dim=1)
+
+       violent_score = float(probs[0][1] + probs[0][2] + probs[0][3])
+
+       # -----------------------------
+       # Display Info
+       # -----------------------------
+       cv2.putText(frame, f"Violence Score: {violent_score:.2f}",
+                   (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+       # -----------------------------
+       # Buzzer Control
+       # -----------------------------
+       if violent_score > 0.70:
+           cv2.putText(frame, "VIOLENCE DETECTED!",
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+
+           if not buzzer_on:
+               try:
+                   requests.get(f"http://{NODEMCU_IP}/ON", timeout=1)
+                   print("🚨 Buzzer ON")
+                   buzzer_on = True
+               except Exception as e:
+                   print("Error sending ON:", e)
+
+       else:
+           if buzzer_on:
+               try:
+                   requests.get(f"http://{NODEMCU_IP}/OFF", timeout=1)
+                   print("✓ Buzzer OFF")
+                   buzzer_on = False
+               except Exception as e:
+                   print("Error sending OFF:", e)
+
+       # -----------------------------
+       # Show Frame
+       # -----------------------------
+       cv2.imshow("Violence Detection (PC Server)", frame)
+
+       # Exit
+       if cv2.waitKey(1) & 0xFF == ord('q'):
+           try:
+               requests.get(f"http://{NODEMCU_IP}/OFF")
+           except:
+               pass
+           break
+
+   except Exception as e:
+       print("Error:", e)
+       break
+
+# -----------------------------
+# CLEANUP
+# -----------------------------
+conn.close()
+server_socket.close()
+cv2.destroyAllWindows()
+
+## Raspberry Pi Code (Send Image to PC)
+import socket
+import cv2
+
+PC_IP = "192.168.1.100"   # 🔴 Replace with your PC IP
+PORT = 5000
+
+client_socket = socket.socket()
+client_socket.connect((PC_IP, PORT))
+
+cap = cv2.VideoCapture(0)
+
+while True:
+   ret, frame = cap.read()
+   if not ret:
+       break
+
+   _, buffer = cv2.imencode('.jpg', frame)
+   client_socket.sendall(buffer.tobytes())
+
+
