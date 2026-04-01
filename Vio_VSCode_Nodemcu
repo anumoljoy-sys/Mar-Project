@@ -1,0 +1,244 @@
+Arduino IDE and Thingspeak:
+
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <WiFiClient.h>
+
+// -----------------------------
+// WiFi Credentials
+// -----------------------------
+const char* ssid = "NRLab";
+const char* password = "NRLAB1@ajce";
+
+// -----------------------------
+// ThingSpeak Settings
+// -----------------------------
+const char* thingspeakServer = "http://api.thingspeak.com/update";
+String apiKey = "YOUR_API_KEY";   //  Replace with your API key
+
+// -----------------------------
+// Server + Buzzer
+// -----------------------------
+WiFiServer server(80);
+int buzzerPin = D5;
+
+// -----------------------------
+// Setup
+// -----------------------------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(buzzerPin, OUTPUT);
+  digitalWrite(buzzerPin, LOW);
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  Serial.print("NodeMCU IP: ");
+  Serial.println(WiFi.localIP());
+
+  server.begin();
+}
+
+// -----------------------------
+// Loop
+// -----------------------------
+void loop() {
+  WiFiClient client = server.available();
+
+  if (client) {
+    Serial.println("Client Connected");
+
+    String request = client.readStringUntil('\r');
+    client.flush();
+
+    Serial.println("Request: " + request);
+
+    // Turn ON buzzer + send to ThingSpeak
+    if (request.indexOf("/ON") != -1) {
+      digitalWrite(buzzerPin, HIGH);
+      Serial.println("BUZZER ON");
+
+      sendToThingSpeak(1);  // Violence detected
+    }
+
+    //  Turn OFF buzzer + send to ThingSpeak
+    if (request.indexOf("/OFF") != -1) {
+      digitalWrite(buzzerPin, LOW);
+      Serial.println("BUZZER OFF");
+
+      sendToThingSpeak(0);  // No violence
+    }
+
+    // Send response to client
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/html");
+    client.println("");
+    client.println("OK");
+
+    delay(1);
+    client.stop();
+    Serial.println("Client Disconnected");
+  }
+}
+
+// -----------------------------
+// Send Data to ThingSpeak
+// -----------------------------
+void sendToThingSpeak(int value) {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClient client;
+    HTTPClient http;
+
+    String url = String(thingspeakServer) + "?api_key=" + apiKey + "&field1=" + String(value);
+
+    Serial.println("Sending to ThingSpeak...");
+    Serial.println(url);
+
+    http.begin(client, url);
+    int httpCode = http.GET();
+
+    if (httpCode > 0) {
+      Serial.print("HTTP Response Code: ");
+      Serial.println(httpCode);
+      Serial.println("Data sent to ThingSpeak ✔");
+    } else {
+      Serial.print("Error sending data: ");
+      Serial.println(httpCode);
+    }
+
+    http.end();
+
+    delay(15000);  //  ThingSpeak requires 15 sec delay
+  } else {
+    Serial.println("WiFi not connected");
+  }
+}
+
+# VS Code
+
+import torch
+import cv2
+from PIL import Image
+import requests
+
+from transformers import CLIPProcessor, CLIPModel
+
+# -----------------------------
+# NodeMCU IP
+# -----------------------------
+NODEMCU_IP = "192.168.137.30"
+
+# -----------------------------
+# Load CLIP model (only once)
+# -----------------------------
+print("Loading CLIP model...")
+clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+labels = [
+    "a peaceful scene",
+    "people fighting",
+    "a violent attack",
+    "a person holding a weapon",
+    "normal everyday activity"
+]
+
+# -----------------------------
+# Start Webcam
+# -----------------------------
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    print("Error: Cannot access webcam")
+    exit()
+
+print("\n🎥 Webcam started. Press 'q' to quit.")
+
+buzzer_on = False
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Convert OpenCV frame (BGR) → PIL image (RGB)
+    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    # -----------------------------
+    # CLIP Processing
+    # -----------------------------
+    inputs = clip_processor(text=labels, images=image, return_tensors="pt", padding=True)
+    outputs = clip_model(**inputs)
+
+    logits = outputs.logits_per_image
+    probs = logits.softmax(dim=1)
+
+    violent_score = probs[0][1] + probs[0][2] + probs[0][3]
+
+    # -----------------------------
+    # Display probabilities
+    # -----------------------------
+    text = f"Violence Score: {float(violent_score):.2f}"
+    cv2.putText(frame, text, (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+
+    # -----------------------------
+    # Buzzer Control
+    # -----------------------------
+    if violent_score > 0.70:
+        cv2.putText(frame, "VIOLENCE DETECTED!", (10, 70),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        if not buzzer_on:
+            try:
+                requests.get(f"http://{NODEMCU_IP}/ON")
+                print("🚨 Buzzer ON")
+                buzzer_on = True
+            except Exception as e:
+                print("Error sending ON:", e)
+
+    else:
+        if buzzer_on:
+            try:
+                requests.get(f"http://{NODEMCU_IP}/OFF")
+                print("✓ Buzzer OFF")
+                buzzer_on = False
+            except Exception as e:
+                print("Error sending OFF:", e)
+
+    # -----------------------------
+    # Show Video
+    # -----------------------------
+    cv2.imshow("Violence Detection", frame)
+
+    # -----------------------------
+    # Press 'q' to exit + turn OFF buzzer
+    # -----------------------------
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        try:
+            requests.get(f"http://{NODEMCU_IP}/OFF")
+            print("Buzzer OFF (Manual Stop)")
+        except:
+            pass
+        break
+
+# -----------------------------
+# Cleanup
+# -----------------------------
+cap.release()
+cv2.destroyAllWindows()
+
+
+
+
+
+
+
+
