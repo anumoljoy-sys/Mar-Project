@@ -1,0 +1,45 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+const char* ssid = "YOUR_WIFI_NAME";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+ESP8266WebServer server(80);
+
+#define BUZZER D5   // GPIO14
+
+void handleOn() {
+ digitalWrite(BUZZER, HIGH);
+ server.send(200, "text/plain", "BUZZER ON");
+}
+
+void handleOff() {
+ digitalWrite(BUZZER, LOW);
+ server.send(200, "text/plain", "BUZZER OFF");
+}
+
+void setup() {
+ Serial.begin(9600);
+ pinMode(BUZZER, OUTPUT);
+ digitalWrite(BUZZER, LOW);
+
+ WiFi.begin(ssid, password);
+ Serial.print("Connecting");
+
+ while (WiFi.status() != WL_CONNECTED) {
+   delay(500);
+   Serial.print(".");
+ }
+
+ Serial.println("\nConnected!");
+ Serial.print("IP Address: ");
+ Serial.println(WiFi.localIP());
+
+ server.on("/on", handleOn);
+ server.on("/off", handleOff);
+ server.begin();
+}
+
+void loop() {
+ server.handleClient();
+}
