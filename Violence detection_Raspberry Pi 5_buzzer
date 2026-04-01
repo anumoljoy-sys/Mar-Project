@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+
+import socket
+import json
+import sys
+import os
+import argparse
+import cv2
+import requests
+
+# -------------------------------
+# CONFIG (CHANGE THESE)
+# -------------------------------
+NODEMCU_IP = "192.168.1.50"     # CHANGE to your NodeMCU IP
+BUZZER_ON_URL = f"http://{NODEMCU_IP}/on"
+BUZZER_OFF_URL = f"http://{NODEMCU_IP}/off"
+
+# -------------------------------
+# Violence Detection Prompt
+# -------------------------------
+VIOLENCE_PROMPT = """<|im_start|>system
+You are a visual safety classifier.
+Respond ONLY with one word: VIOLENCE or NO_VIOLENCE.
+<|im_end|>
+<|im_start|>user
+<img_placement>
+Is there physical violence, fighting, assault, or weapon attack in this image?
+<|im_end|>
+<|im_start|>assistant
+"""
+
+# -------------------------------
+# Vision Client
+# -------------------------------
+class VisionClient:
+   def __init__(self, socket_path):
+       self.socket_path = socket_path
+       self.request_id = 0
+
+   def _connect(self):
+       sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+       sock.connect(self.socket_path)
+       return sock
+
+   def _send_request(self, request):
+       sock = self._connect()
+       try:
+           sock.sendall(json.dumps(request).encode("utf-8"))
+           response = sock.recv(65536).decode("utf-8")
+           return json.loads(response)
+       finally:
+           sock.close()
+
+   def next_id(self):
+       self.request_id += 1
+       return self.request_id
+
+   def initialize(self):
+       return self._send_request({
+           "id": self.next_id(),
+           "init": {"model_path": "dummy"}
+       })
+
+   def clear_kv_cache(self):
+       return self._send_request({
+           "id": self.next_id(),
+           "clear_kv_cache": {}
+       })
+
+   def infer(self, image_path, prompt, n_predict=8):
+       return self._send_request({
+           "id": self.next_id(),
+           "infer": {
+               "image_path": image_path,
+               "prompt": prompt,
+               "n_predict": n_predict
+           }
+       })
+
+# -------------------------------
+# MAIN
+# -------------------------------
+if __name__ == "__main__":
+
+   parser = argparse.ArgumentParser(description="Vision Violence Detection with Buzzer")
+   parser.add_argument("--socket", type=str, default="/tmp/vision.sock")
+   args = parser.parse_args()
+
+   if not os.path.exists(args.socket):
+       print("❌ Vision socket not found. Is llama-vision-socket running?")
+       sys.exit(1)
+
+   client = VisionClient(args.socket)
+
+   print("🔄 Initializing vision model...")
+   init = client.initialize()
+   if not init.get("success", False):
+       print("❌ Init failed:", init.get("error"))
+       sys.exit(1)
+   print("✅ Model initialized")
+
+   cap = cv2.VideoCapture(0)
+   if not cap.isOpened():
+       print("❌ Camera open failed")
+       sys.exit(1)
+
+   image_path = ".image.png"
+   violence_detected = False
+
+   print("🎥 Press ENTER to analyze frame | Press Q to quit")
+
+   while True:
+       ret, frame = cap.read()
+       if not ret:
+           print("❌ Camera read error")
+           break
+
+       label = "VIOLENCE" if violence_detected else "NO VIOLENCE"
+       color = (0, 0, 255) if violence_detected else (0, 255, 0)
+
+       cv2.putText(
+           frame,
+           label,
+           (20, 40),
+           cv2.FONT_HERSHEY_SIMPLEX,
+           1,
+           color,
+           2
+       )
+
+       cv2.imshow("Violence Detection", frame)
+       key = cv2.waitKey(1) & 0xFF
+
+       # ENTER → capture + infer
+       if key in [10, 13]:
+           cv2.imwrite(image_path, frame)
+
+           client.clear_kv_cache()
+           response = client.infer(
+               os.path.abspath(image_path),
+               VIOLENCE_PROMPT,
+               n_predict=8
+           )
+
+           if not response.get("success", False):
+               print("❌ Inference failed:", response.get("error"))
+               continue
+
+           result = response["result"]["text"].strip().upper()
+           violence_detected = "VIOLENCE" in result
+
+           print("🧠 Result:", result)
+
+           try:
+               if violence_detected:
+                   print("🚨 Violence detected → BUZZER ON")
+                   requests.get(BUZZER_ON_URL, timeout=1)
+               else:
+                   print("✅ No violence → BUZZER OFF")
+                   requests.get(BUZZER_OFF_URL, timeout=1)
+           except Exception as e:
+               print("⚠️ NodeMCU connection error:", e)
+
+       # Q → quit
+       elif key == ord('q'):
+           print("👋 Exiting...")
+           break
+
+   cap.release()
+   cv2.destroyAllWindows()
+
+   if os.path.exists(image_path):
+       os.remove(image_path)
+
